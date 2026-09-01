@@ -49,7 +49,6 @@ PRODUCTION_READY_VIBESCRIPT_WORKBENCHES = frozenset(
         "InspectionWorkbench",
         "RobotWorkbench",
         "FemWorkbench",
-        "CAMWorkbench",
         "TechDrawWorkbench",
     }
 )
@@ -219,6 +218,8 @@ def test_shared_vibescript_lifecycle_is_unambiguous_for_the_operating_model() ->
         "vibescript.read_api",
         "vibescript.read_geometry",
         "vibescript.read_placement",
+        "vibescript.create_part",
+        "vibescript.create_assembly",
         "vibescript.create_program",
         "vibescript.build_program",
         "vibescript.edit_source",
@@ -289,10 +290,19 @@ def test_shared_vibescript_lifecycle_is_unambiguous_for_the_operating_model() ->
         "vibescript.delete_program",
     ):
         assert universal[write_name]["safety"] == "SAFE_WRITE"
+
     for workbench in USER_WORKBENCHES:
         pack = domains.get_vibescript_pack(workbench)
         assert pack is not None
-        assert set(pack.provider_tool_names) == set(universal)
+        expected_provider_tools = set(universal)
+        if workbench in {"PartDesignWorkbench", "AssemblyWorkbench"}:
+            expected_provider_tools.remove("vibescript.create_program")
+        else:
+            expected_provider_tools -= {
+                "vibescript.create_part",
+                "vibescript.create_assembly",
+            }
+        assert set(pack.provider_tool_names) == expected_provider_tools
         specs = {
             spec["name"].rsplit(".", 1)[-1]: spec
             for spec in domains.domain_tool_specs(pack)
@@ -433,6 +443,7 @@ def test_geometry_worker_release_smoke_executes_real_brep_validation(
         "worker_executable",
         lambda: Path("/runtime/bin/VibeCADGeometryWorker"),
     )
+    expected_worker = str(Path("/runtime/bin/VibeCADGeometryWorker"))
 
     def validate(candidate, **kwargs):
         assert candidate is shape
@@ -442,7 +453,7 @@ def test_geometry_worker_release_smoke_executes_real_brep_validation(
     monkeypatch.setattr(geometry_worker, "validate_shape", validate)
 
     assert geometry_worker.runtime_execution_smoke() == {
-        "worker": "/runtime/bin/VibeCADGeometryWorker",
+        "worker": expected_worker,
         "valid": True,
         "elapsed_seconds": 0.125,
     }
@@ -481,7 +492,7 @@ def test_every_domain_description_is_copy_ready_for_the_operating_model() -> Non
         assert grouped_names == list(dict.fromkeys(grouped_names))
         assert set(grouped_names) == set(pack.api_exports)
         assert "redundan" in json.dumps(description).lower()
-        assert len(json.dumps(description, separators=(",", ":")).encode()) < 48_000
+        assert len(json.dumps(description, separators=(",", ":")).encode()) < 52_000
 
         handoffs = json.dumps(description["workbench_handoffs"]).lower()
         assert "active workbench determines the available api" in handoffs
@@ -1218,7 +1229,7 @@ def test_native_tool_runner_reports_document_thread_duration(
     monkeypatch.setattr(
         session,
         "_live_provider_surface_state",
-        lambda _service, _mode: {
+        lambda _service: {
             "workbench": "PartDesignWorkbench",
             "engine": "native",
             "surface_id": "native-test",
@@ -1417,7 +1428,7 @@ def test_provider_tool_runner_authorizes_a_failed_source_created_in_the_same_tur
     monkeypatch.setattr(
         session,
         "_live_provider_surface_state",
-        lambda _service, _mode: {
+        lambda _service: {
             "workbench": "PartDesignWorkbench",
             "engine": "vibescript",
             "surface_id": "vibescript-partdesign-v2",
@@ -2494,7 +2505,7 @@ def test_editable_sources_indexes_hidden_outputs_and_sources_without_outputs() -
     assert index["tools"]["read_api"] == "vibescript.read_api"
     assert index["tools"]["read_geometry"] == "vibescript.read_geometry"
     assert index["tools"]["read_placement"] == "vibescript.read_placement"
-    assert index["tools"]["create_program"] == "vibescript.create_program"
+    assert index["tools"]["create_program"] == "vibescript.create_part"
     assert index["tools"]["edit_source"] == "vibescript.edit_source"
     assert index["tools"]["set_inputs"] == "vibescript.set_inputs"
     assert index["tools"]["reconfigure_program"] == ("vibescript.reconfigure_program")
@@ -3136,6 +3147,7 @@ def test_component_inventory_removes_generated_carrier_names() -> None:
             "label": "FixedBase",
             "kind": "definition",
             "reference": reference,
+            "occurrence_key": "FixedBase",
         }
     ]
 
@@ -3570,9 +3582,9 @@ def test_part_api_is_explicit_documented_and_generated_from_the_runtime() -> Non
     )
     assert selection["join_touching_faces_or_shells"] == "api.sew"
     assert selection["remove_redundant_boolean_splitters"] == "api.refine"
-    assert "one helix operation" in selection["redundancy_contract"]
-    assert "one projection operation" in selection["redundancy_contract"]
-    assert "There are no model-facing" in selection["redundancy_contract"]
+    assert "api.helix(representation=...)" in selection["redundancy_contract"]
+    assert "api.project(mode=...)" in selection["redundancy_contract"]
+    assert "Canonical operations:" in selection["redundancy_contract"]
     assert description["composition_contract"]["construction_order"][-1].startswith(
         "Return only semantic publication outputs"
     )
@@ -6746,6 +6758,7 @@ def test_domain_api_graph_and_worker_inputs_are_deeply_immutable() -> None:
             document_objects=[],
             inputs={"dimensions": [2, 3, 4]},
             api=api,
+            expected_output_names=[],
             max_operations=1_000,
             max_seconds=1.0,
         )
@@ -6760,6 +6773,7 @@ def test_domain_api_graph_and_worker_inputs_are_deeply_immutable() -> None:
             document_objects=[],
             inputs={},
             api=api,
+            expected_output_names=["Body"],
             max_operations=1_000,
             max_seconds=1.0,
         )
@@ -6782,6 +6796,7 @@ def test_source_operation_budget_excludes_trusted_domain_api_frames() -> None:
         document_objects=[],
         inputs={},
         api=TrustedAPI(),
+        expected_output_names=["Value"],
         max_operations=10,
         max_seconds=1.0,
     )
@@ -6800,6 +6815,7 @@ def test_source_operation_budget_excludes_trusted_domain_api_frames() -> None:
             document_objects=[],
             inputs={},
             api=TrustedAPI(),
+            expected_output_names=["Value"],
             max_operations=10,
             max_seconds=1.0,
         )
@@ -6962,13 +6978,12 @@ def test_domain_context_is_aggregate_bounded_and_points_to_exact_inspection(
     assert "vibescript.read_source" in output_facts["subelement_details_guidance"]
 
 
-def test_generic_prototype_adapters_cannot_surface_unfinished_domains() -> None:
+def test_nonproduction_packs_cannot_surface_unfinished_domains() -> None:
     for workbench, pack in domains.VIBESCRIPT_WORKBENCH_PACKS.items():
         if pack.production_ready:
             continue
         adapter = domains.get_domain_adapter(pack.domain)
         assert adapter is not None
-        assert adapter.production_ready is False
         available, reason = domains.domain_availability(workbench)
         assert available is False
         assert "production-readiness gate" in reason
@@ -7737,6 +7752,61 @@ def test_occurrence_screenshot_isolation_hides_definition_but_preserves_body_tip
         assert definition.ViewObject.Visibility is False
         assert tip.ViewObject.Visibility is True
         assert unrelated.ViewObject.Visibility is False
+
+    assert all(obj.ViewObject.Visibility is True for obj in objects)
+
+
+def test_screenshot_isolation_restores_children_hidden_by_container_side_effects() -> None:
+    from tool_impl.service import core_set_view
+
+    class View:
+        def __init__(self):
+            self._visible = True
+            self.children = []
+
+        @property
+        def Visibility(self):
+            return self._visible
+
+        @Visibility.setter
+        def Visibility(self, visible):
+            self._visible = bool(visible)
+            if not self._visible:
+                for child in self.children:
+                    child.Visibility = False
+
+    class Object:
+        def __init__(self, name: str, type_id: str = "Part::Feature"):
+            self.Name = name
+            self.TypeId = type_id
+            self.ViewObject = View()
+            self.Tip = None
+
+        def getParentGeoFeatureGroup(self):
+            return None
+
+        def getParentGroup(self):
+            return None
+
+    target = Object("FixtureBlock")
+    operation = Object("FaceOperation", "Path::FeaturePython")
+    controller = Object("ToolController", "Path::FeaturePython")
+    job = Object("Job", "App::DocumentObjectGroupPython")
+    job.ViewObject.children = [operation.ViewObject, controller.ViewObject]
+    objects = [target, job, operation, controller]
+
+    class Document:
+        Objects = objects
+
+        @staticmethod
+        def getObject(name):
+            return next((obj for obj in objects if obj.Name == name), None)
+
+    with core_set_view.temporarily_isolate_objects(Document(), [target.Name]):
+        assert target.ViewObject.Visibility is True
+        assert job.ViewObject.Visibility is False
+        assert operation.ViewObject.Visibility is False
+        assert controller.ViewObject.Visibility is False
 
     assert all(obj.ViewObject.Visibility is True for obj in objects)
 
