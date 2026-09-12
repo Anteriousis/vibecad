@@ -54,6 +54,7 @@ from VibeCADTokenUsage import (
     format_usage_summary,
     sanitize_usage_metadata,
     summarize_conversation_usage,
+    usage_summary_presentation,
 )
 
 
@@ -1648,6 +1649,91 @@ def _conversation_usage_entries(output: Any) -> list[dict[str, Any]]:
     return [dict(entry) for entry in entries if isinstance(entry, dict)]
 
 
+def _usage_history_snapshot(output: Any) -> list[dict[str, Any]]:
+    """Own only usage metadata; retain empty positions for sequence fallbacks."""
+    snapshot = []
+    for entry in _conversation_usage_entries(output):
+        metadata = entry.get("metadata")
+        usage = sanitize_usage_metadata(metadata.get("usage")) if isinstance(metadata, dict) else None
+        snapshot.append(
+            {"sequence": entry.get("sequence"), "metadata": {"usage": usage}}
+            if usage is not None else {}
+        )
+    return snapshot
+
+
+def _request_usage_summary(dock: Any | None = None) -> None:
+    """Coalesce streamed updates without doing history calculations on the GUI."""
+    from PySide import QtCore
+    from VibeCADTokenUsage import UsageSummaryWorker
+
+    output = _find_child("QTextBrowser", "VibeConversation", dock)
+    toggle = _find_child("QToolButton", "VibeUsageSummaryToggle", dock)
+    if output is None or toggle is None:
+        return
+    if not toggle.isChecked():
+        _render_usage_summary(dock)
+        return
+    renderer = getattr(output, "_vibecad_usage_renderer", None)
+    if renderer is None:
+        class Renderer(QtCore.QObject):
+            completed = QtCore.Signal(int, object)
+
+            def __init__(self):
+                super().__init__(output)
+                self.entries = None
+                self.completed.connect(self.apply, QtCore.Qt.QueuedConnection)
+                self.worker = UsageSummaryWorker(self.completed.emit)
+                output.installEventFilter(self)
+                output.destroyed.connect(self.worker.close)
+
+            def eventFilter(self, watched, event):
+                if (event.type() == QtCore.QEvent.DynamicPropertyChange
+                        and bytes(event.propertyName()) == b"VibeConversationEntries"):
+                    self.entries = None
+                    self.worker.invalidate()
+                return False
+
+            def apply(self, generation, result):
+                if not self.worker.is_current(generation) or not toggle.isChecked():
+                    return
+                if _find_child("QTextBrowser", "VibeConversation", dock) is not output:
+                    return
+                if "error" in result:
+                    _warn("VibeCAD usage summary failed: " + result["error"])
+                    return
+                details = _find_child("QLabel", "VibeUsageSummaryDetails", dock)
+                if details is None:
+                    return
+                _apply_usage_text(dock, details, result)
+                details.show()
+                scroll = _find_child("QScrollArea", "VibeUsageSummaryScroll", dock)
+                if scroll is not None:
+                    scroll.show()
+                _render_usage_graph(dock, {}, details, graph_data=result["graph"])
+
+        renderer = Renderer()
+        output._vibecad_usage_renderer = renderer
+    if renderer.entries is None:
+        # Qt returns a detached value for the dynamic property. Reuse this owned
+        # snapshot until the property's change event invalidates it.
+        renderer.entries = _usage_history_snapshot(output)
+    renderer.worker.submit(
+        renderer.entries, sanitize_usage_metadata(output.property("VibeActiveTokenUsage"))
+    )
+
+
+def _apply_usage_text(dock: Any, details: Any, presentation: dict[str, Any]) -> None:
+    saved_turns = _find_child("QLabel", "VibeUsageTurnDetails", dock)
+    text = presentation["text"] if saved_turns is None else presentation["summary_text"]
+    if getattr(details, "text", lambda: None)() != text:
+        details.setText(text)
+    if saved_turns is not None:
+        if saved_turns.text() != presentation["turn_text"]:
+            saved_turns.setText(presentation["turn_text"])
+        saved_turns.setVisible(bool(presentation["turn_text"]))
+
+
 def _render_usage_summary(
     dock: Any | None = None,
     *,
@@ -1660,6 +1746,9 @@ def _render_usage_summary(
     toggle = _find_child("QToolButton", "VibeUsageSummaryToggle", dock)
     if output is None or details is None or toggle is None:
         return
+    renderer = getattr(output, "_vibecad_usage_renderer", None)
+    if renderer is not None:
+        renderer.worker.invalidate()
     expanded = bool(toggle.isChecked())
     details.setVisible(expanded)
     scroll = _find_child("QScrollArea", "VibeUsageSummaryScroll", dock)
@@ -1686,7 +1775,7 @@ def _render_usage_summary(
             }
         )
     summary = summarize_conversation_usage(entries)
-    details.setText(format_usage_summary(summary))
+    _apply_usage_text(dock, details, usage_summary_presentation(summary, active=active))
     _render_usage_graph(dock, summary, details)
     details.setToolTip(
         "Provider-reported actual usage only. No quota or monetary cost is inferred."
@@ -3610,7 +3699,7 @@ def _execute_assistant_run(
             output = _find_child("QTextBrowser", "VibeConversation", current_dock)
             if usage is not None and output is not None:
                 output.setProperty("VibeActiveTokenUsage", usage)
-                _render_usage_summary(current_dock)
+                _request_usage_summary(current_dock)
         if event.get("event") == "provider_turn_output":
             text = str(event.get("text") or "").strip()
             if text:
@@ -6191,6 +6280,11 @@ def _make_usage_summary_widget(parent: Any) -> Any:
     details.setTextFormat(QtCore.Qt.PlainText)
     details.setText("No actual provider-reported token usage is available.")
     layout.addWidget(details)
+    saved_turns = QtWidgets.QLabel(content)
+    saved_turns.setObjectName("VibeUsageTurnDetails")
+    saved_turns.setWordWrap(True)
+    saved_turns.setTextFormat(QtCore.Qt.PlainText)
+    layout.addWidget(saved_turns)
     scroll.setWidget(content)
     scroll.hide()
     return scroll
@@ -6222,12 +6316,17 @@ def _make_usage_graph_widget(parent: Any) -> Any:
             self._height = 34
 
         def set_usage_data(self, graph_data: dict[str, Any]) -> None:
-            self._graph_data = graph_data if isinstance(graph_data, dict) else {}
+            data = graph_data if isinstance(graph_data, dict) else {}
+            if data == self._graph_data:
+                return
+            self._graph_data = data
             rows = self._graph_data.get("rows")
             count = len(rows) if isinstance(rows, list) else 0
-            self._height = 34 if count == 0 else 70 + count * 58
-            self.setMinimumHeight(self._height)
-            self.updateGeometry()
+            height = 34 if count == 0 else 70 + count * 58
+            if height != self._height:
+                self._height = height
+                self.setMinimumHeight(self._height)
+                self.updateGeometry()
             self.update()
 
         def sizeHint(self) -> Any:
@@ -6401,7 +6500,9 @@ def _render_usage_summary(
     _existing_usage_summary_renderer(dock, conversation=conversation)
 
 
-def _render_usage_graph(dock: Any, summary: dict[str, Any], details: Any) -> None:
+def _render_usage_graph(
+    dock: Any, summary: dict[str, Any], details: Any, *, graph_data: dict[str, Any] | None = None
+) -> None:
     graph = _find_child("QWidget", "VibeUsageGraph", dock)
     if graph is None:
         parent = details.parentWidget()
@@ -6414,5 +6515,5 @@ def _render_usage_graph(dock: Any, summary: dict[str, Any], details: Any) -> Non
 
     setter = getattr(graph, "set_usage_data", None)
     if callable(setter):
-        setter(usage_graph_data(summary))
+        setter(usage_graph_data(summary) if graph_data is None else graph_data)
     graph.setVisible(True)

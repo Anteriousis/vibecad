@@ -541,6 +541,21 @@ def _format_counts(counts: Mapping[str, Any] | None) -> str:
     )
 
 
+def format_usage_turns(turns: list[dict[str, Any]]) -> str:
+    """Format per-turn detail independently from changing conversation totals."""
+    lines = []
+    for turn in turns:
+        if not isinstance(turn, Mapping):
+            continue
+        status = str(turn.get("status") or "unknown")
+        if not turn.get("complete"):
+            status += ", incomplete"
+        lines.append(
+            f"Turn {turn.get('sequence', '?')} ({status}): " f"{_format_counts(turn.get('counts'))}"
+        )
+    return "\n".join(lines)
+
+
 def format_usage_summary(summary: Mapping[str, Any]) -> str:
     """Format the compact expandable panel content in plain text."""
 
@@ -561,15 +576,7 @@ def format_usage_summary(summary: Mapping[str, Any]) -> str:
                 else "unknown"
             )
             lines.append(f"{model_name} ({model_source}): {_format_counts(counts)}")
-    for turn in summary.get("turns") or []:
-        if not isinstance(turn, Mapping):
-            continue
-        status = str(turn.get("status") or "unknown")
-        if not turn.get("complete"):
-            status += ", incomplete"
-        lines.append(
-            f"Turn {turn.get('sequence', '?')} ({status}): " f"{_format_counts(turn.get('counts'))}"
-        )
+    lines.extend(format_usage_turns(summary.get("turns") or []).splitlines())
     lines.append(
         "Cached input and reasoning are subsets; they are not added again. "
         "Serialized bytes/4 estimate is not included."
@@ -630,3 +637,92 @@ def usage_graph_data(summary: Mapping[str, Any]) -> dict[str, Any]:
 
 
 __all__.append("usage_graph_data")
+
+
+def render_usage_snapshot(history: list[dict[str, Any]], active: Any) -> dict[str, Any]:
+    """Calculate presentation from an owned snapshot without accessing Qt or CAD."""
+    entries = list(history)
+    clean_active = sanitize_usage_metadata(active)
+    if clean_active is not None:
+        entries.append({
+            "role": "assistant", "sequence": len(entries) + 1,
+            "metadata": {"usage": clean_active},
+        })
+    summary = summarize_conversation_usage(entries)
+    return usage_summary_presentation(summary, active=clean_active)
+
+
+def usage_summary_presentation(summary: dict[str, Any], *, active: Any = None) -> dict[str, Any]:
+    """Separate stable turn history from the small, live summary for Qt layout."""
+    active_reported = bool(active and active.get("actual") and active.get("reported"))
+    turns = summary.get("turns") or []
+    return {
+        "text": format_usage_summary(summary),
+        "summary_text": format_usage_summary({**summary, "turns": turns[-1:] if active_reported else []}),
+        "turn_text": format_usage_turns(turns[:-1] if active_reported else turns),
+        "graph": usage_graph_data(summary),
+    }
+
+
+class UsageSummaryWorker:
+    """One calculation in flight and one replaceable pending snapshot per panel.
+
+    The caller owns the input snapshots and must not mutate them after submission.
+    Publishing runs on this worker; GUI callers must use a queued signal and check
+    is_current again on delivery. Closing never waits for a calculation.
+    """
+
+    def __init__(self, publish: Any, *, compute: Any = None) -> None:
+        self._publish = publish
+        self._compute = compute or render_usage_snapshot
+        self._condition = threading.Condition()
+        self._generation = 0
+        self._pending = None
+        self._closed = False
+        self._thread = threading.Thread(target=self._run, name="VibeCAD usage summary", daemon=True)
+        self._thread.start()
+
+    def submit(self, history: list[dict[str, Any]], active: Any) -> int:
+        with self._condition:
+            self._generation += 1
+            if not self._closed:
+                self._pending = (self._generation, history, active)
+                self._condition.notify()
+            return self._generation
+
+    def invalidate(self) -> None:
+        with self._condition:
+            self._generation += 1
+            self._pending = None
+
+    def is_current(self, generation: int) -> bool:
+        with self._condition:
+            return not self._closed and generation == self._generation
+
+    def close(self) -> None:
+        with self._condition:
+            self._closed = True
+            self._pending = None
+            self._condition.notify()
+
+    def _run(self) -> None:
+        while True:
+            with self._condition:
+                self._condition.wait_for(lambda: self._closed or self._pending is not None)
+                if self._closed:
+                    return
+                generation, history, active = self._pending
+                self._pending = None
+            try:
+                result = self._compute(history, active)
+            except Exception as exc:
+                result = {"error": str(exc)}
+            if self.is_current(generation):
+                try:
+                    self._publish(generation, result)
+                except RuntimeError:
+                    # The Qt signal's owner may have been deleted during delivery.
+                    self.close()
+
+
+__all__.extend(["render_usage_snapshot", "UsageSummaryWorker", "format_usage_turns", "usage_summary_presentation"])
