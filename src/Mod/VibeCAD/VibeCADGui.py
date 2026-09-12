@@ -1660,6 +1660,13 @@ def _render_usage_summary(
     toggle = _find_child("QToolButton", "VibeUsageSummaryToggle", dock)
     if output is None or details is None or toggle is None:
         return
+    expanded = bool(toggle.isChecked())
+    details.setVisible(expanded)
+    graph = _find_child("QWidget", "VibeUsageGraph", dock)
+    if graph is not None:
+        graph.setVisible(expanded)
+    if not expanded:
+        return
     entries = (
         [dict(entry) for entry in conversation if isinstance(entry, dict)]
         if conversation is not None
@@ -1677,7 +1684,7 @@ def _render_usage_summary(
         )
     summary = summarize_conversation_usage(entries)
     details.setText(format_usage_summary(summary))
-    details.setVisible(bool(toggle.isChecked()))
+    _render_usage_graph(dock, summary, details)
     details.setToolTip(
         "Provider-reported actual usage only. No quota or monetary cost is inferred."
     )
@@ -2271,6 +2278,21 @@ def _format_progress_event(event: dict[str, Any]) -> str:
         if delta and not delta.startswith("not available"):
             return f"{base} | {delta}"
         return base
+    if name == "provider_reasoning_effort":
+        effective = str(event.get("effective_effort") or "none")
+        if event.get("adaptive"):
+            requested = str(event.get("requested_effort") or effective)
+            return f"Reasoning effort: {effective} (adaptive; selected {requested})"
+        return f"Reasoning effort: {effective}"
+    if name == "provider_context_compacted":
+        return "Provider context was compacted; re-anchoring the next turn."
+    if name == "provider_reference_image_delivery":
+        attached = int(event.get("attached_count", 0) or 0)
+        available = int(event.get("available_count", 0) or 0)
+        reused = int(event.get("reused_count", 0) or 0)
+        if reused:
+            return f"Reference images: {attached} new, {reused} reused ({available} available)."
+        return f"Reference images: {attached} attached ({available} available)."
     if name == "provider_turn_completed":
         return "CAD step completed."
     if name == "provider_turn_output":
@@ -2512,6 +2534,9 @@ _PROGRESS_STATUS_ONLY_EVENTS: set[str] = {
     "native_tool_document_phase_completed",
     "native_tool_document_phase_started",
     "provider_turn_started",
+    "provider_reasoning_effort",
+    "provider_context_compacted",
+    "provider_reference_image_delivery",
     "vibescript_domain_deferred_recompute_completed",
     "vibescript_domain_phase_completed",
     "vibescript_domain_phase_started",
@@ -6351,14 +6376,11 @@ def _render_usage_summary(
     *,
     conversation: list[dict[str, Any]] | None = None,
 ) -> None:
-    """Refresh the text summary and keep its graph visible directly below the header."""
-
+    """Refresh text and graph from one summary, only while expanded."""
     _existing_usage_summary_renderer(dock, conversation=conversation)
-    output = _find_child("QTextBrowser", "VibeConversation", dock)
-    details = _find_child("QLabel", "VibeUsageSummaryDetails", dock)
-    toggle = _find_child("QToolButton", "VibeUsageSummaryToggle", dock)
-    if output is None or details is None or toggle is None:
-        return
+
+
+def _render_usage_graph(dock: Any, summary: dict[str, Any], details: Any) -> None:
     graph = _find_child("QWidget", "VibeUsageGraph", dock)
     if graph is None:
         parent = details.parentWidget()
@@ -6367,31 +6389,9 @@ def _render_usage_summary(
         if layout is not None:
             index = layout.indexOf(details)
             layout.insertWidget(index if index >= 0 else layout.count(), graph)
-    entries = (
-        [dict(entry) for entry in conversation if isinstance(entry, dict)]
-        if conversation is not None
-        else _conversation_usage_entries(output)
-    )
-    active = sanitize_usage_metadata(output.property("VibeActiveTokenUsage"))
-    if active is not None:
-        entries.append(
-            {
-                "role": "assistant",
-                "content": "Active provider request",
-                "sequence": len(entries) + 1,
-                "metadata": {"usage": active},
-            }
-        )
-    summary = summarize_conversation_usage(entries)
     from VibeCADTokenUsage import usage_graph_data
 
     setter = getattr(graph, "set_usage_data", None)
     if callable(setter):
         setter(usage_graph_data(summary))
-    graph.setVisible(bool(toggle.isChecked()))
-    details.setToolTip(
-        "Provider-reported actual usage only. No quota or monetary cost is inferred."
-    )
-    toggle.setToolTip(
-        "Show actual input, cached-input, output, reasoning, and per-model usage."
-    )
+    graph.setVisible(True)

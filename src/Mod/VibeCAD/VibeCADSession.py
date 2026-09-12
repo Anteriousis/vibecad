@@ -593,6 +593,7 @@ def choose_provider(
     if provider_name == "grok":
         from VibeCADGrokAuth import DEFAULT_XAI_API_BASE
 
+        adaptive_reasoning = getattr(service, "provider_adaptive_reasoning", None)
         return CodexProvider(
             model=service.provider_model(),
             api_key=service.provider_api_key(),
@@ -603,8 +604,12 @@ def choose_provider(
             skills_enabled=False,
             identity_id="grok",
             identity_label="Grok via X / xAI OAuth",
+            adaptive_reasoning=(
+                bool(adaptive_reasoning()) if callable(adaptive_reasoning) else False
+            ),
         )
     if provider_name in {"openai", "chatgpt"}:
+        adaptive_reasoning = getattr(service, "provider_adaptive_reasoning", None)
         return CodexProvider(
             model=service.provider_model(),
             api_key=(service.provider_api_key() if provider_name == "openai" else None),
@@ -615,9 +620,13 @@ def choose_provider(
             ),
             web_search_enabled=service.web_search_enabled(),
             skills_enabled=service.codex_skills_enabled(),
+            adaptive_reasoning=(
+                bool(adaptive_reasoning()) if callable(adaptive_reasoning) else False
+            ),
         )
     if provider_name == "anthropic":
         intent_memory_model = getattr(service, "intent_memory_model", None)
+        adaptive_reasoning = getattr(service, "provider_adaptive_reasoning", None)
         return AnthropicProvider(
             model=service.provider_model(),
             api_key=service.provider_api_key(),
@@ -629,13 +638,20 @@ def choose_provider(
                 if callable(intent_memory_model)
                 else service.provider_model()
             ),
+            adaptive_reasoning=(
+                bool(adaptive_reasoning()) if callable(adaptive_reasoning) else False
+            ),
         )
     if provider_name == "gemini":
+        adaptive_reasoning = getattr(service, "provider_adaptive_reasoning", None)
         return GeminiProvider(
             model=service.provider_model(),
             api_key=service.provider_api_key(),
             reasoning_effort=service.provider_reasoning_effort(),
             base_url=service.provider_base_url(),
+            adaptive_reasoning=(
+                bool(adaptive_reasoning()) if callable(adaptive_reasoning) else False
+            ),
         )
     raise ProviderUnavailable(f"Unsupported provider: {provider_name}")
 
@@ -3305,8 +3321,6 @@ def _filtered_api_payload(
     requested_order = list(names)
     for group in groups:
         requested_order.extend(api_groups[group])
-    if str(result.get("domain") or "") == "assembly":
-        requested_order.extend(("assembly", "solve"))
     ordered_names = list(dict.fromkeys(requested_order))
     focused = {
         key: result[key]
