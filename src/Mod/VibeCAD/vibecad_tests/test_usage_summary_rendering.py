@@ -25,7 +25,7 @@ def test_usage_disclosure_scans_history_once_only_when_expanded(monkeypatch, exp
     )
     children = {"VibeConversation": output, "VibeUsageSummaryDetails": details,
                 "VibeUsageSummaryToggle": toggle, "VibeUsageGraph": graph}
-    monkeypatch.setattr(gui, "_find_child", lambda kind, name, dock: children[name])
+    monkeypatch.setattr(gui, "_find_child", lambda kind, name, dock: children.get(name))
     monkeypatch.setattr(gui, "_conversation_usage_entries", lambda widget: scans.append(widget) or [])
     gui._render_usage_summary()
     assert len(scans) == int(expanded)

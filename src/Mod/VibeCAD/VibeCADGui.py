@@ -1662,6 +1662,9 @@ def _render_usage_summary(
         return
     expanded = bool(toggle.isChecked())
     details.setVisible(expanded)
+    scroll = _find_child("QScrollArea", "VibeUsageSummaryScroll", dock)
+    if scroll is not None:
+        scroll.setVisible(expanded)
     graph = _find_child("QWidget", "VibeUsageGraph", dock)
     if graph is not None:
         graph.setVisible(expanded)
@@ -5320,13 +5323,8 @@ def _build_panel_widget():
     conversation_header_layout.addWidget(new_conversation)
     conversation_layout.addWidget(conversation_header)
 
-    usage_details = QtWidgets.QLabel(conversation_panel)
-    usage_details.setObjectName("VibeUsageSummaryDetails")
-    usage_details.setWordWrap(True)
-    usage_details.setTextFormat(QtCore.Qt.PlainText)
-    usage_details.setText("No actual provider-reported token usage is available.")
-    usage_details.setVisible(False)
-    conversation_layout.addWidget(usage_details)
+    usage_scroll = _make_usage_summary_widget(conversation_panel)
+    conversation_layout.addWidget(usage_scroll)
     usage_toggle.toggled.connect(
         lambda checked: _render_usage_summary(dock=conversation_panel)
     )
@@ -6174,6 +6172,29 @@ def ensure_commands_registered() -> None:
 
 
 # Token usage graph -----------------------------------------------------------
+
+def _make_usage_summary_widget(parent: Any) -> Any:
+    """Bound expanded usage so long histories leave room for the conversation."""
+    from PySide import QtCore, QtWidgets
+
+    scroll = QtWidgets.QScrollArea(parent)
+    scroll.setObjectName("VibeUsageSummaryScroll")
+    scroll.setWidgetResizable(True)
+    scroll.setMaximumHeight(280)
+    scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
+    content = QtWidgets.QWidget(scroll)
+    layout = QtWidgets.QVBoxLayout(content)
+    layout.setContentsMargins(0, 0, 0, 0)
+    details = QtWidgets.QLabel(content)
+    details.setObjectName("VibeUsageSummaryDetails")
+    details.setWordWrap(True)
+    details.setTextFormat(QtCore.Qt.PlainText)
+    details.setText("No actual provider-reported token usage is available.")
+    layout.addWidget(details)
+    scroll.setWidget(content)
+    scroll.hide()
+    return scroll
+
 
 def _make_usage_graph_widget(parent: Any) -> Any:
     """Create a compact graph for the provider-reported usage disclosure."""
